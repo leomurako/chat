@@ -3,7 +3,7 @@
   // ★ RenderにデプロイしたらここのURLを書き換えてください ★
   // 例: 'wss://my-chat-app.onrender.com'
   // ======================================================
-  const RENDER_WS_URL = 'wss://YOUR-APP-NAME.onrender.com';
+  const RENDER_WS_URL = 'https://chat-server-isoe.onrender.com';
 
   // ローカル（localhost）のときは自動的にローカルサーバーへ接続
   const WS_URL = location.hostname === 'localhost' || location.hostname === '127.0.0.1'
