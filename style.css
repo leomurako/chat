@@ -411,3 +411,24 @@ html, body {
   .msg-group { max-width: 82%; }
   .emoji-grid { grid-template-columns: repeat(7, 1fr); }
 }
+
+/* ===== 既読バッジ ===== */
+.read-badge {
+  font-size: .62rem;
+  color: #aaa;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ===== トースト ===== */
+#toast { transition: opacity .2s; }
+
+/* ===== msg-meta（時刻＋既読を横並び） ===== */
+.msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 0 4px;
+}
+.msg-row.self .msg-meta { justify-content: flex-end; }
