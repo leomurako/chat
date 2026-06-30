@@ -7,7 +7,7 @@
   const RENDER_WS_URL = 'https://chat-server-isoe.onrender.com';
   function resolveWsUrl() {
     const h = location.hostname;
-    return (h === 'localhost' || h === '127.0.0.1') ? `https://${location.host}` : RENDER_WS_URL;
+    return (h === 'localhost' || h === '127.0.0.1') ? `ws://${location.host}` : RENDER_WS_URL;
   }
 
   /* =====================================================
