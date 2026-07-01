@@ -2,37 +2,45 @@
   'use strict';
 
   /* =====================================================
-     WebSocket URL を自動解決
-     - ローカル開発 (localhost): ws://localhost:3000
-     - GitHub Pages等の別オリジン: wss://chat-server-isoe.onrender.com
+     サーバー設定
+     - ローカル開発: ws://localhost:3000
+     - 本番(GitHub Pages + Render): wss://chat-server-isoe.onrender.com
   ===================================================== */
-  const RENDER_SERVER = 'wss://chat-server-isoe.onrender.com';
+  const RENDER_WS     = 'wss://chat-server-isoe.onrender.com';
+  const RENDER_HTTP   = 'https://chat-server-isoe.onrender.com';
+
+  function isLocal() {
+    const h = location.hostname;
+    return h === 'localhost' || h === '127.0.0.1';
+  }
 
   function resolveWsUrl() {
-    const h = location.hostname;
-    if (h === 'localhost' || h === '127.0.0.1') {
-      return `ws://${location.host}`;
-    }
-    return RENDER_SERVER;
+    return isLocal() ? `ws://${location.host}` : RENDER_WS;
+  }
+
+  function resolveHttpBase() {
+    return isLocal() ? '' : RENDER_HTTP;  // '' = 同一オリジン相対パス
   }
 
   /* =====================================================
      状態変数
   ===================================================== */
-  let ws            = null;
-  let myUsername    = '';
-  let currentRoom   = { code: null, name: '', icon: '💬' };
-  let replyTarget   = null;
-  let editTarget    = null;
-  let ctxTarget     = null;
-  let joinedRooms   = [];
-  let selectedEmoji = '💬';
-  let currentTab    = 'login';
-  let readObserver  = null;
-  let pendingImage  = null;
-  let typingTimer   = null;
-  let typingUsers   = new Set();
+  let ws               = null;
+  let myUsername       = '';
+  let currentRoom      = { code: null, name: '', icon: '💬' };
+  let replyTarget      = null;
+  let editTarget       = null;
+  let ctxTarget        = null;
+  let joinedRooms      = [];
+  let selectedEmoji    = '💬';
+  let currentTab       = 'login';
+  let readObserver     = null;
+  let pendingImage     = null;
+  let typingTimer      = null;
+  let typingUsers      = new Set();
   let typingClearTimers = {};
+  let pendingOnOpen    = null;  // 接続待ち中のコールバック
+  let waking           = false; // ウェイクアップ中フラグ
 
   const $ = id => document.getElementById(id);
   const SCREENS = ['screen-login','screen-home','screen-create','screen-join','screen-chat'];
@@ -66,7 +74,7 @@
       const username=u.value.trim(), password=p.value;
       if(err) err.textContent='';
       if(!username||!password) { if(err) err.textContent='すべて入力してください'; return; }
-      connect(() => {
+      connectWithWakeup(() => {
         wsSend({ type:'auth', username, password, isRegister: currentTab==='register' });
         const rem=$('remember-me');
         if(rem&&rem.checked) saveSession(username,password);
@@ -198,7 +206,7 @@
 
   window.closeImageModal = function(e) {
     try { const m=$('image-modal'); if(!m) return; if(!e||e.target===m) m.classList.add('hidden'); }
-    catch(e) { console.error('closeImageModal',e); }
+    catch(err) { console.error('closeImageModal',err); }
   };
 
   window.ctxAction = function(action) {
@@ -245,7 +253,7 @@
 
   window.closeHistoryModal = function(e) {
     try { const m=$('history-modal'); if(!m) return; if(!e||e.target===m) m.classList.add('hidden'); }
-    catch(e) { console.error('closeHistoryModal',e); }
+    catch(err) { console.error('closeHistoryModal',err); }
   };
 
   window.requestNotificationPermission = function() {
@@ -261,29 +269,115 @@
   };
 
   /* =====================================================
-     WebSocket
+     ウェイクアップ＋WebSocket接続
+     Renderのスリープ対策：
+     1. まず /health にHTTPリクエストを送りサーバーを起こす
+     2. OKが返ってきたらWebSocketで接続
+     3. ローカルはスキップ
   ===================================================== */
-  function connect(onOpen) {
+  async function connectWithWakeup(onOpen) {
     try {
-      if(ws&&ws.readyState===1) { onOpen(); return; }
+      // すでに接続済みならそのまま使う
+      if(ws && ws.readyState === 1) { onOpen(); return; }
+      // 既存の壊れた接続は必ず破棄（これが「ボタンが効かない」バグの直接修正）
       if(ws) { try{ws.close();}catch(_){} ws=null; }
-      const url=resolveWsUrl();
+
+      // ローカル開発はウェイクアップ不要
+      if(isLocal()) { connectWs(onOpen); return; }
+
+      // スリープ中の場合があるのでウェイクアップ処理
+      if(waking) {
+        // すでにウェイクアップ中なら、完了したら呼ぶコールバックを上書き
+        pendingOnOpen = onOpen;
+        return;
+      }
+      waking = true;
+      pendingOnOpen = onOpen;
+      setAuthStatus('サーバーを起動中... (初回は最大30秒かかります)', 'info');
+
+      const MAX_TRIES = 20;   // 最大20回 × 2秒 = 40秒
+      let tries = 0;
+      const poll = async () => {
+        tries++;
+        try {
+          const res = await fetch(`${RENDER_HTTP}/health`, {
+            method: 'GET',
+            cache: 'no-store',
+            signal: AbortSignal.timeout(4000),
+          });
+          if(res.ok) {
+            // サーバー起動確認、WS接続へ
+            setAuthStatus('', 'clear');
+            waking = false;
+            const cb = pendingOnOpen;
+            pendingOnOpen = null;
+            connectWs(cb);
+            return;
+          }
+        } catch(_) {
+          // fetch失敗 = まだ起動中、無視してリトライ
+        }
+        if(tries >= MAX_TRIES) {
+          waking = false;
+          pendingOnOpen = null;
+          setAuthStatus('サーバーの起動に失敗しました。ページを再読み込みしてください。', 'error');
+          return;
+        }
+        // 2秒待ってリトライ
+        const dots = '.'.repeat((tries % 3) + 1);
+        setAuthStatus(`サーバーを起動中${dots} (${tries}/${MAX_TRIES})`, 'info');
+        setTimeout(poll, 2000);
+      };
+      poll();
+    } catch(e) { console.error('connectWithWakeup', e); }
+  }
+
+  function setAuthStatus(msg, type) {
+    const err = $('auth-error');
+    if(!err) return;
+    err.textContent = msg;
+    err.style.color = type === 'error' ? '#e53935' : type === 'info' ? '#1a73e8' : '';
+  }
+
+  function connectWs(onOpen) {
+    try {
+      const url = resolveWsUrl();
       console.log('WS接続先:', url);
-      ws=new WebSocket(url);
-      ws.addEventListener('open', ()=>{ try{onOpen();}catch(e){console.error('onOpen',e);} });
-      ws.addEventListener('message', e=>{ try{handle(JSON.parse(e.data));}catch(err){console.error('msg',err);} });
-      ws.addEventListener('close', ()=>{ showBanner('接続が切れました。再読み込みしてください。'); });
-      ws.addEventListener('error', ()=>{
-        const el=$('auth-error');
-        if(el) el.textContent='サーバーに接続できません（サーバーが起動中か確認してください）';
+      ws = new WebSocket(url);
+
+      ws.addEventListener('open', () => {
+        try { onOpen(); } catch(e) { console.error('onOpen', e); }
       });
-    } catch(e) { console.error('connect',e); }
+
+      ws.addEventListener('message', e => {
+        try { handle(JSON.parse(e.data)); } catch(err) { console.error('msg', err); }
+      });
+
+      ws.addEventListener('close', (ev) => {
+        // コード1006 = 異常切断（スリープによるものが多い）
+        console.warn('WS close code:', ev.code);
+        ws = null;  // ← 必ずリセット。これで次回ボタン押下時に再接続できる
+        const sc = $('screen-chat');
+        if(sc && !sc.classList.contains('hidden')) {
+          showBanner('接続が切れました。ホームに戻って再接続してください。');
+        }
+      });
+
+      ws.addEventListener('error', (e) => {
+        console.error('WS error:', e);
+        ws = null;  // ← 必ずリセット
+        setAuthStatus('サーバーに接続できません', 'error');
+      });
+    } catch(e) {
+      console.error('connectWs', e);
+      ws = null;
+    }
   }
 
   function wsSend(obj) {
     try {
       if(ws&&ws.readyState===1) ws.send(JSON.stringify(obj));
-      else console.warn('wsSend skip', obj.type);
+      else console.warn('wsSend skip (not open)', obj.type);
     } catch(e) { console.error('wsSend',e); }
   }
 
@@ -293,7 +387,7 @@
   function handle(data) {
     switch(data.type) {
       case 'authOk':          onAuthOk(data); break;
-      case 'authError':       { const el=$('auth-error'); if(el) el.textContent=data.text; break; }
+      case 'authError':       { const el=$('auth-error'); if(el){el.textContent=data.text; el.style.color='';} break; }
       case 'roomCreated':     onRoomCreated(data); break;
       case 'roomJoined':      onRoomJoined(data); break;
       case 'roomError':       { const ce=$('create-error'),je=$('join-error'); if(ce) ce.textContent=data.text; if(je) je.textContent=data.text; break; }
@@ -426,8 +520,7 @@
 
     if(!isSelf) {
       const un=document.createElement('div');
-      un.className='msg-username';
-      un.textContent=data.username;
+      un.className='msg-username'; un.textContent=data.username;
       group.appendChild(un);
     }
 
@@ -447,18 +540,14 @@
     } else if(data.imageUrl) {
       bubble.style.padding='4px';
       const img=document.createElement('img');
-      img.className='msg-image';
-      img.src=data.imageUrl;
-      img.alt='送信された画像';
-      img.loading='lazy';
+      img.className='msg-image'; img.src=data.imageUrl; img.alt='送信された画像'; img.loading='lazy';
       img.addEventListener('click',()=>window.openImageModal(data.imageUrl));
       img.addEventListener('error',()=>{ img.style.display='none'; });
       bubble.appendChild(img);
       if(data.text) {
         const txt=document.createElement('p');
         txt.style.cssText='margin:4px 6px 2px;font-size:.9rem;line-height:1.5;';
-        txt.textContent=data.text;
-        bubble.appendChild(txt);
+        txt.textContent=data.text; bubble.appendChild(txt);
       }
     } else {
       bubble.textContent=data.text;
@@ -568,7 +657,7 @@
       }, 5000);
     } else {
       typingUsers.delete(data.username);
-      if(typingClearTimers[data.username]) { clearTimeout(typingClearTimers[data.username]); delete typingClearTimers[data.username]; }
+      if(typingClearTimers[data.username]){clearTimeout(typingClearTimers[data.username]);delete typingClearTimers[data.username];}
     }
     renderTypingIndicator();
   }
@@ -603,14 +692,17 @@
   async function uploadAndSend(img, text) {
     try {
       showToast('画像をアップロード中...');
-      const res=await fetch('/upload',{
+      const base = resolveHttpBase();
+      const res=await fetch(`${base}/upload`,{
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({ dataUrl:img.dataUrl })
       });
       if(!res.ok) { const e=await res.json(); showToast(e.error||'アップロード失敗'); return; }
       const { url }=await res.json();
-      wsSend({ type:'message', text, imageUrl:url, replyTo:replyTarget });
+      // 本番ではサーバーの絶対URLに変換する
+      const fullUrl = isLocal() ? url : `${RENDER_HTTP}${url}`;
+      wsSend({ type:'message', text, imageUrl:fullUrl, replyTo:replyTarget });
       window.cancelReply();
     } catch(e) { console.error('uploadAndSend',e); showToast('アップロードに失敗しました'); }
   }
@@ -725,12 +817,10 @@
   function esc(str) {
     return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
-
   function cssEsc(str) {
     if(window.CSS&&window.CSS.escape) return window.CSS.escape(str);
     return String(str).replace(/([^\w-])/g,'\\$1');
   }
-
   function loadSaved() {
     try { const s=localStorage.getItem('chat_session'); return s?JSON.parse(s):null; } catch(e) { return null; }
   }
@@ -750,15 +840,17 @@
       initEmojiGrid();
       updateNotifBtn();
 
+      // ログイン保持
       const saved=loadSaved();
       if(saved) {
-        connect(()=>{
+        connectWithWakeup(()=>{
           wsSend({type:'auth',username:saved.username,password:saved.password,isRegister:false});
           const u=$('auth-username'),r=$('remember-me');
           if(u) u.value=saved.username; if(r) r.checked=true;
         });
       }
 
+      // キーボードイベント
       const binds=[
         ['auth-password', 'keydown', e=>{ if(e.key==='Enter') window.doAuth(); }],
         ['join-code',     'keydown', e=>{ if(e.key==='Enter') window.doJoinRoom(); }],
@@ -769,7 +861,7 @@
       ];
       binds.forEach(([id,ev,fn])=>{ const el=$(id); if(el) el.addEventListener(ev,fn); });
 
-      console.log('チャットアプリ初期化完了 WS:', resolveWsUrl());
+      console.log('チャットアプリ初期化完了');
     } catch(e) { console.error('init',e); }
   }
 
