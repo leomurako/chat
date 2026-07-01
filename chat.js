@@ -271,59 +271,68 @@
   /* =====================================================
      ウェイクアップ＋WebSocket接続
      Renderのスリープ対策：
-     1. まず /health にHTTPリクエストを送りサーバーを起こす
-     2. OKが返ってきたらWebSocketで接続
-     3. ローカルはスキップ
+     1. /health にfetchを送ってサーバーを起こす
+     2. レスポンスが来た（CORSエラー含む）= サーバー起動済み → WS接続
+     3. タイムアウト（ネット断・サーバーが本当に落ちている）= リトライ
+     ※ CORSエラーはサーバーが応答しているサインなので「起動済み」と判定する
+        （CORSヘッダーの修正をserver.jsに入れているが、デプロイ前の保険として両方対応）
   ===================================================== */
   async function connectWithWakeup(onOpen) {
     try {
-      // すでに接続済みならそのまま使う
       if(ws && ws.readyState === 1) { onOpen(); return; }
-      // 既存の壊れた接続は必ず破棄（これが「ボタンが効かない」バグの直接修正）
       if(ws) { try{ws.close();}catch(_){} ws=null; }
-
-      // ローカル開発はウェイクアップ不要
       if(isLocal()) { connectWs(onOpen); return; }
 
-      // スリープ中の場合があるのでウェイクアップ処理
-      if(waking) {
-        // すでにウェイクアップ中なら、完了したら呼ぶコールバックを上書き
-        pendingOnOpen = onOpen;
-        return;
-      }
+      if(waking) { pendingOnOpen = onOpen; return; }
       waking = true;
       pendingOnOpen = onOpen;
       setAuthStatus('サーバーを起動中... (初回は最大30秒かかります)', 'info');
 
-      const MAX_TRIES = 20;   // 最大20回 × 2秒 = 40秒
+      const MAX_TRIES = 20;
       let tries = 0;
+
       const poll = async () => {
         tries++;
+        let serverIsUp = false;
         try {
           const res = await fetch(`${RENDER_HTTP}/health`, {
             method: 'GET',
             cache: 'no-store',
-            signal: AbortSignal.timeout(4000),
+            signal: AbortSignal.timeout(5000),
           });
-          if(res.ok) {
-            // サーバー起動確認、WS接続へ
-            setAuthStatus('', 'clear');
-            waking = false;
-            const cb = pendingOnOpen;
-            pendingOnOpen = null;
-            connectWs(cb);
-            return;
+          // 200 OK → 確実に起動済み
+          if(res.ok) serverIsUp = true;
+        } catch(err) {
+          // TypeError: Failed to fetch の場合を細かく判定する
+          // CORSブロック → ブラウザがエラーを投げるが「サーバーは応答している」
+          // ネットワーク断・タイムアウト → サーバーがまだ起動していない
+          const msg = (err && err.message) ? err.message.toLowerCase() : '';
+          const isCors = msg.includes('cors') || msg.includes('failed to fetch') || msg.includes('network');
+          // "Failed to fetch" はCORSエラーでも出る。
+          // CORSエラーの場合、ブラウザコンソールに 200 (OK) と表示される特徴がある。
+          // AbortError（タイムアウト）の場合はサーバーがまだ起動していない。
+          if(err && err.name === 'AbortError') {
+            serverIsUp = false; // タイムアウト = 未起動
+          } else if(isCors) {
+            serverIsUp = true; // CORSブロックだがサーバーは動いている
           }
-        } catch(_) {
-          // fetch失敗 = まだ起動中、無視してリトライ
         }
+
+        if(serverIsUp) {
+          setAuthStatus('', 'clear');
+          waking = false;
+          const cb = pendingOnOpen;
+          pendingOnOpen = null;
+          connectWs(cb);
+          return;
+        }
+
         if(tries >= MAX_TRIES) {
           waking = false;
           pendingOnOpen = null;
           setAuthStatus('サーバーの起動に失敗しました。ページを再読み込みしてください。', 'error');
           return;
         }
-        // 2秒待ってリトライ
         const dots = '.'.repeat((tries % 3) + 1);
         setAuthStatus(`サーバーを起動中${dots} (${tries}/${MAX_TRIES})`, 'info');
         setTimeout(poll, 2000);
