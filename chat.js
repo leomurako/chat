@@ -3,13 +3,17 @@
 
   /* =====================================================
      WebSocket URL を自動解決
-     - ローカル開発: ws://localhost:3000
-     - Render等 HTTPS環境: wss://chat-server-isoe.onrender.com
-     - フロントとサーバーが同一オリジンならパスだけでOK
+     - ローカル開発 (localhost): ws://localhost:3000
+     - GitHub Pages等の別オリジン: wss://chat-server-isoe.onrender.com
   ===================================================== */
+  const RENDER_SERVER = 'wss://chat-server-isoe.onrender.com';
+
   function resolveWsUrl() {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${location.host}`;
+    const h = location.hostname;
+    if (h === 'localhost' || h === '127.0.0.1') {
+      return `ws://${location.host}`;
+    }
+    return RENDER_SERVER;
   }
 
   /* =====================================================
