@@ -1,49 +1,8 @@
-import 'package:flutter/foundation.dart';
-
 import '../models/library_models.dart';
+import 'library_store_base.dart';
 
-class LoginInput {
-  const LoginInput({
-    required this.role,
-    this.className,
-    this.studentNumber,
-    this.name,
-    this.adminName,
-    required this.password,
-  });
-
-  final UserRole role;
-  final String? className;
-  final String? studentNumber;
-  final String? name;
-  final String? adminName;
-  final String password;
-}
-
-class ReservationView {
-  const ReservationView({
-    required this.reservation,
-    required this.user,
-    required this.book,
-  });
-
-  final Reservation reservation;
-  final LibraryUser user;
-  final Book book;
-}
-
-class BookRequestView {
-  const BookRequestView({
-    required this.request,
-    required this.user,
-  });
-
-  final BookRequest request;
-  final LibraryUser user;
-}
-
-class LibraryStore extends ChangeNotifier {
-  LibraryStore() {
+class MockLibraryStore extends LibraryStoreBase {
+  MockLibraryStore() {
     _users = [
       const LibraryUser(
         id: "student-001",
@@ -187,18 +146,38 @@ class LibraryStore extends ChangeNotifier {
   late List<BookRequest> _requests;
   late List<AdminLog> _adminLogs;
 
+  @override
   List<LibraryUser> get users => List.unmodifiable(_users);
+
+  LibraryUser userById(String id) => _users.firstWhere((user) => user.id == id);
+
+  Book bookById(String id) => _books.firstWhere((book) => book.id == id);
+
+  @override
   List<Book> get books => List.unmodifiable(_books.where((book) => book.isActive));
+
+  @override
   List<Book> get allBooks => List.unmodifiable(_books);
+
+  @override
   List<Reservation> get reservations => List.unmodifiable(_reservations);
+
+  @override
   List<BookRequest> get requests => List.unmodifiable(_requests);
+
+  @override
   List<AdminLog> get adminLogs {
     final logs = [..._adminLogs]
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return List.unmodifiable(logs);
   }
 
-  LibraryUser? login(LoginInput input) {
+  @override
+  Future<LibraryUser?> login(LoginInput input) async {
+    return _loginSync(input);
+  }
+
+  LibraryUser? _loginSync(LoginInput input) {
     if (input.role == UserRole.admin) {
       final adminName = (input.adminName ?? "").trim();
       if (adminName.isEmpty) return null;
@@ -245,10 +224,7 @@ class LibraryStore extends ChangeNotifier {
     return null;
   }
 
-  LibraryUser userById(String id) => _users.firstWhere((user) => user.id == id);
-
-  Book bookById(String id) => _books.firstWhere((book) => book.id == id);
-
+  @override
   int activeReservationsCountForUser(String userId) {
     return _reservations
         .where((reservation) =>
@@ -329,7 +305,8 @@ class LibraryStore extends ChangeNotifier {
       ..sort((a, b) => b.request.requestedAt.compareTo(a.request.requestedAt));
   }
 
-  bool reserveBook({required String userId, required String bookId}) {
+  @override
+  Future<bool> reserveBook({required String userId, required String bookId}) async {
     if (activeReservationsCountForUser(userId) >= 2) return false;
     if (todaysReservationCount(userId) >= 2) return false;
     if (remainingCopies(bookId) <= 0) return false;
@@ -354,7 +331,8 @@ class LibraryStore extends ChangeNotifier {
     return true;
   }
 
-  void markDelivered(String reservationId) {
+  @override
+  Future<void> markDelivered(String reservationId) async {
     _reservations = _reservations
         .map((reservation) => reservation.id == reservationId
             ? reservation.copyWith(
@@ -367,7 +345,8 @@ class LibraryStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void markReturned(String reservationId) {
+  @override
+  Future<void> markReturned(String reservationId) async {
     _reservations = _reservations
         .map((reservation) => reservation.id == reservationId
             ? reservation.copyWith(
@@ -379,13 +358,14 @@ class LibraryStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void addBook({
+  @override
+  Future<void> addBook({
     required String title,
     required String genre,
     required String author,
     required String publisher,
     required int totalCopies,
-  }) {
+  }) async {
     _books = [
       Book(
         id: "book-${DateTime.now().millisecondsSinceEpoch}",
@@ -400,20 +380,22 @@ class LibraryStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void removeBook(String bookId) {
+  @override
+  Future<void> removeBook(String bookId) async {
     _books = _books
         .map((book) => book.id == bookId ? book.copyWith(isActive: false) : book)
         .toList();
     notifyListeners();
   }
 
-  void submitRequest({
+  @override
+  Future<void> submitRequest({
     required String userId,
     required String title,
     required String genre,
     required String author,
     required String publisher,
-  }) {
+  }) async {
     _requests = [
       BookRequest(
         id: "req-${DateTime.now().millisecondsSinceEpoch}",
@@ -429,7 +411,8 @@ class LibraryStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void approveRequest(String requestId, int totalCopies) {
+  @override
+  Future<void> approveRequest(String requestId, int totalCopies) async {
     final request = _requests.firstWhere((request) => request.id == requestId);
     _books = [
       Book(
@@ -450,6 +433,7 @@ class LibraryStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  @override
   Map<String, int> reservationsByClass() {
     final result = <String, int>{};
     for (final reservation in _reservations) {
@@ -460,6 +444,7 @@ class LibraryStore extends ChangeNotifier {
     return result;
   }
 
+  @override
   List<MapEntry<LibraryUser, int>> userRanking() {
     final counts = <String, int>{};
     for (final reservation in _reservations) {
